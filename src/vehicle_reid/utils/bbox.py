@@ -1,10 +1,13 @@
 from __future__ import annotations
-import numpy as np
-from dataclasses import dataclass
 
 
 class BBoxValidationError(ValueError):
     pass
+
+
+import math
+from dataclasses import dataclass
+
 
 
 @dataclass
@@ -26,24 +29,26 @@ class BBox:
         if self.x + self.w > img_w + 1 or self.y + self.h > img_h + 1:
             raise BBoxValidationError("BBox выходит за границы изображения")
 
-    def to_xyxy(self):
-        return self.x, self.y, self.x + self.w, self.y + self.h
+    def to_xyxy(self, img_w: int, img_h: int, patch_size: int = 0) -> tuple[int, int, int, int]:
+        """Целочисленные координаты, обрезанные по границам изображения.
+        patch_size > 0 — стороны расширяются до кратных patch_size (если влезает в картинку)."""
+        x1 = max(0, math.floor(self.x))
+        y1 = max(0, math.floor(self.y))
+        x2 = min(img_w, math.ceil(self.x + self.w))
+        y2 = min(img_h, math.ceil(self.y + self.h))
+        if x2 <= x1 or y2 <= y1:
+            raise BBoxValidationError(f"Пустой bbox после обрезки: {self}")
+        if patch_size > 0:
+            x1, x2 = self._snap(x1, x2, img_w, patch_size)
+            y1, y2 = self._snap(y1, y2, img_h, patch_size)
+        return x1, y1, x2, y2
 
-
-def crop_with_padding(image: np.ndarray, bbox: BBox, padding_ratio: float = 0.1) -> np.ndarray:
-    """Вырезает область BBox с относительным паддингом и клипом по границам."""
-    img_h, img_w = image.shape[:2]
-    bbox.validate(img_w, img_h)
-
-    pad_w = bbox.w * padding_ratio
-    pad_h = bbox.h * padding_ratio
-
-    x1 = int(max(0, round(bbox.x - pad_w)))
-    y1 = int(max(0, round(bbox.y - pad_h)))
-    x2 = int(min(img_w, round(bbox.x + bbox.w + pad_w)))
-    y2 = int(min(img_h, round(bbox.y + bbox.h + pad_h)))
-
-    if x2 <= x1 or y2 <= y1:
-        raise BBoxValidationError("Некорректный BBox после обрезки")
-
-    return image[y1:y2, x1:x2].copy()
+    @staticmethod
+    def _snap(lo: int, hi: int, limit: int, p: int) -> tuple[int, int]:
+        target = math.ceil((hi - lo) / p) * p
+        if target > limit:
+            target = (limit // p) * p
+        if target == 0:
+            return lo, hi
+        lo = min(lo, limit - target)  # если не влезает вправо — сдвигаем влево
+        return lo, lo + target

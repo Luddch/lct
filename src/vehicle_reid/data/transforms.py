@@ -5,27 +5,36 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
-def build_train_transforms(image_size):
-    h, w = image_size
-    return A.Compose([
-        A.Resize(h, w),
+def _color_jitter():
+    # Для ReID цвет машины — ключевой признак: hue/saturation слабые, без grayscale.
+    return A.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.1, hue=0.02, p=0.8)
+
+
+def _geometry(size: int, scale: tuple[float, float]):
+    return [
+        A.RandomResizedCrop(size=(size, size), scale=scale),  # albumentations >= 1.4
         A.HorizontalFlip(p=0.5),
-        A.OneOf([
-            A.MotionBlur(blur_limit=3),
-            A.GaussianBlur(blur_limit=3),
-        ], p=0.2),
-        A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02, p=0.5),
-        A.CoarseDropout(num_holes_range=(1, 3), hole_height_range=(0.05, 0.15),
-                         hole_width_range=(0.05, 0.15), p=0.3),  # random erasing
-        A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ToTensorV2(),
-    ])
+    ]
 
 
-def build_eval_transforms(image_size):
-    h, w = image_size
-    return A.Compose([
-        A.Resize(h, w),
-        A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ToTensorV2(),
-    ])
+def _finalize():
+    return [A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD), ToTensorV2()]
+
+
+def build_global_crop_transforms(size: int = 224) -> tuple[A.Compose, A.Compose]:
+    """Два асимметричных глобальных трансформа, как в DINO."""
+    t1 = A.Compose(
+        _geometry(size, (0.4, 1.0)) + [_color_jitter(), A.GaussianBlur(sigma_limit=(0.1, 2.0), p=1.0)] + _finalize()
+    )
+    t2 = A.Compose(
+        _geometry(size, (0.4, 1.0))
+        + [_color_jitter(), A.GaussianBlur(sigma_limit=(0.1, 2.0), p=0.1), A.Solarize(p=0.2)]
+        + _finalize()
+    )
+    return t1, t2
+
+
+def build_local_crop_transforms(size: int = 96) -> A.Compose:
+    return A.Compose(
+        _geometry(size, (0.05, 0.4)) + [_color_jitter(), A.GaussianBlur(sigma_limit=(0.1, 2.0), p=0.5)] + _finalize()
+    )

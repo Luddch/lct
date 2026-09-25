@@ -5,20 +5,20 @@ project:
   weights_dir: weights
 
 data:
-  root: dataset
-  images_dir: dataset/images
-  train_csv: dataset/train.csv
-  query_csv: dataset/test_query.csv
-  gallery_csv: dataset/test_gallery.csv
+  root: D:/Downloads/dataset
+  images_dir: D:/Downloads/dataset/images
+  train_csv: D:/Downloads/dataset/train.csv
+  query_csv: D:/Downloads/dataset/test_query.csv
+  gallery_csv: D:/Downloads/dataset/test_gallery.csv
 
   image_size: [224, 224]
   bbox_padding: 0.10
   val_ratio: 0.10
 
 model:
-  backbone: resnet50
+  backbone: vit_large_patch16_dinov3.lvd1689m
   pretrained: true
-  embedding_dim: 512
+  embedding_dim: 1024
   pooling: gem
   neck: bnneck
   use_attributes: false
@@ -37,7 +37,7 @@ loss:
 train:
   epochs: 40
 
-  batch_size_p: 12
+  batch_size_p: 4
   batch_size_k: 4
 
   num_workers: 4

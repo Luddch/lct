@@ -1,66 +1,44 @@
 import torch
 import torch.nn as nn
-
-from src.vehicle_reid.models.backbone import build_backbone
-from src.vehicle_reid.models.pooling import GeM
-from src.vehicle_reid.models.heads import ArcMarginHead, AttributeHead
+import torch.nn.functional as F
 
 
-class VehicleReIDModel(nn.Module):
-    """
-    Backbone -> GeM pooling -> Bottleneck (BNNeck) -> embedding
-    embedding используется на inference (после BN, L2-нормированный)
-    ArcFace-голова используется только на train для ID-классификации.
-    Опциональные головы атрибутов.
-    """
-
-    def __init__(self, backbone_name, pretrained, embedding_dim,
-                 num_classes, pooling="gem",
-                 arcface_scale=30.0, arcface_margin=0.3,
-                 attribute_num_classes: dict | None = None):
+class DINOHead(nn.Module):
+    def __init__(self, in_dim, out_dim, hidden_dim=2048, bottleneck_dim=256, n_layers=3):
         super().__init__()
-        self.backbone, feat_dim = build_backbone(backbone_name, pretrained)
-        self.pool = GeM() if pooling == "gem" else nn.AdaptiveAvgPool2d(1)
+        layers = [nn.Linear(in_dim, hidden_dim), nn.GELU()]
+        for _ in range(n_layers - 2):
+            layers += [nn.Linear(hidden_dim, hidden_dim), nn.GELU()]
+        layers.append(nn.Linear(hidden_dim, bottleneck_dim))
+        self.mlp = nn.Sequential(*layers)
+        for m in self.mlp.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                nn.init.zeros_(m.bias)
+        # Эквивалент weight_norm с g=1: нормируем строки весов в forward
+        self.last_layer = nn.Linear(bottleneck_dim, out_dim, bias=False)
+        nn.init.trunc_normal_(self.last_layer.weight, std=0.02)
 
-        self.bottleneck = nn.BatchNorm1d(feat_dim)
-        self.bottleneck.bias.requires_grad_(False)  # BNNeck trick (Luo et al.)
+    def forward(self, x):
+        x = self.mlp(x)
+        # последний слой в fp32: логиты делятся на маленькую температуру (0.04),
+        # ошибки bf16 здесь заметно шумят
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            x = F.normalize(x.float(), dim=-1)
+            w = F.normalize(self.last_layer.weight.float(), dim=-1)
+            return F.linear(x, w)
 
-        self.reduce = None
-        if embedding_dim != feat_dim:
-            self.reduce = nn.Linear(feat_dim, embedding_dim)
-            self.bottleneck = nn.BatchNorm1d(embedding_dim)
-            self.bottleneck.bias.requires_grad_(False)
 
-        self.arc_head = ArcMarginHead(embedding_dim, num_classes, arcface_scale, arcface_margin)
+class MultiCropWrapper(nn.Module):
+    """Прогоняет кропы разных разрешений через бэкбон отдельно, голову — один раз."""
 
-        self.attribute_heads = nn.ModuleDict()
-        if attribute_num_classes:
-            for name, n_cls in attribute_num_classes.items():
-                self.attribute_heads[name] = AttributeHead(embedding_dim, n_cls)
+    def __init__(self, backbone: nn.Module, head: nn.Module):
+        super().__init__()
+        self.backbone = backbone
+        self.head = head
 
-    def extract_backbone_feat(self, x):
-        feat_map = self.backbone.forward_features(x)
-        pooled = self.pool(feat_map).flatten(1)
-        if self.reduce is not None:
-            pooled = self.reduce(pooled)
-        return pooled
-
-    def forward(self, x, labels=None):
-        global_feat = self.extract_backbone_feat(x)          # для triplet-loss
-        bn_feat = self.bottleneck(global_feat)                # для ID-loss / inference
-
-        out = {"global_feat": global_feat, "bn_feat": bn_feat}
-
-        if labels is not None:
-            out["logits"] = self.arc_head(bn_feat, labels)
-            for name, head in self.attribute_heads.items():
-                out[f"attr_logits_{name}"] = head(bn_feat)
-        return out
-
-    @torch.no_grad()
-    def get_embedding(self, x):
-        """Inference: нормированный эмбеддинг для векторного поиска."""
-        global_feat = self.extract_backbone_feat(x)
-        bn_feat = self.bottleneck(global_feat)
-        emb = torch.nn.functional.normalize(bn_feat, dim=1)
-        return emb
+    def forward(self, crops):
+        if isinstance(crops, torch.Tensor):
+            crops = [crops]
+        feats = torch.cat([self.backbone(c) for c in crops], dim=0)
+        return self.head(feats)
