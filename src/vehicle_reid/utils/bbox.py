@@ -52,3 +52,26 @@ class BBox:
             return lo, hi
         lo = min(lo, limit - target)  # если не влезает вправо — сдвигаем влево
         return lo, lo + target
+
+def crop_with_padding(image, bbox: "BBox", padding: float = 0.0, patch_size: int = 0):
+    """Кроп по bbox с относительным расширением рамки на padding с каждой стороны.
+
+    image: np.ndarray [H, W, 3]. Возвращает непрерывный массив (copy-free там, где можно).
+    """
+    import numpy as np
+
+    img_h, img_w = image.shape[:2]
+    if padding > 0:
+        pad_w = bbox.w * padding
+        pad_h = bbox.h * padding
+        bbox = BBox(
+            x=bbox.x - pad_w,
+            y=bbox.y - pad_h,
+            w=bbox.w + 2 * pad_w,
+            h=bbox.h + 2 * pad_h,
+        )
+    x1, y1, x2, y2 = bbox.to_xyxy(img_w=img_w, img_h=img_h, patch_size=patch_size)
+    crop = image[y1:y2, x1:x2]
+    if crop.size == 0:
+        raise BBoxValidationError(f"Пустой кроп для bbox={bbox}")
+    return np.ascontiguousarray(crop)

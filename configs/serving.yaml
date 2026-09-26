@@ -1,0 +1,20 @@
+# Конфиг инференса: извлечение эмбеддингов, поиск, API.
+model:
+  weights: ./checkpoints/reid/best.pt        # чекпоинт стадии 2
+  backbone: vit_large_patch16_dinov3.lvd1689m
+  embedding_dim: 0
+  pooling: cls
+  neck: bnneck
+
+data:
+  image_size: [224, 224]
+  bbox_padding: 0.10
+
+runtime:
+  device: cuda
+
+search:
+  metric: cosine
+  backend: torch            # torch | faiss_cpu
+  top_k: 10
+  reject_threshold: 0.35

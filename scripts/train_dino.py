@@ -1,3 +1,9 @@
+"""Стадия 1: DINO self-distillation на нескольких (не)размеченных датасетах.
+
+    python -m scripts.train_dino --config configs/dino.yaml
+"""
+from __future__ import annotations
+
 import argparse
 import logging
 import random
@@ -8,22 +14,23 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.Services.BatchSizeScheduler import BatchSizeScheduler
-from src.vehicle_reid.data.dataset_2 import VehicleReIDDataset
+from src.vehicle_reid.config import load_stage_config
+from src.vehicle_reid.data.datasets import MultiCropDataset
+from src.vehicle_reid.data.sources import build_groups, describe
 from src.vehicle_reid.data.transforms import build_global_crop_transforms, build_local_crop_transforms
 from src.vehicle_reid.engine.train_config import TrainingConfig
 from src.vehicle_reid.engine.trainer_2 import Trainer
 from src.vehicle_reid.losses.losses import DINOLoss
-from src.vehicle_reid.models.model import MultiCropWrapper, DINOHead
+from src.vehicle_reid.models.model import DINOHead, MultiCropWrapper
 
 
 def parse_args():
-    p = argparse.ArgumentParser("DINO fine-tuning for vehicle ReID")
-    p.add_argument("--csv", required=True)
-    p.add_argument("--images-dir", required=True)
-    p.add_argument("--checkpoint-dir", default=None)
+    p = argparse.ArgumentParser("DINO pretraining for vehicle ReID")
+    p.add_argument("--config", default="configs/dino.yaml")
     p.add_argument("--resume", default=None, help="путь к чекпоинту или 'auto'")
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--gpu-batch-size", type=int, default=None)
+    p.add_argument("--checkpoint-dir", default=None)
     return p.parse_args()
 
 
@@ -43,13 +50,20 @@ def seed_worker(worker_id: int):
 def build_model(cfg: TrainingConfig) -> MultiCropWrapper:
     backbone = timm.create_model(
         cfg.model_name,
-        pretrained=True,
-        num_classes=0,             # на выходе pooled CLS-фичи
+        pretrained=cfg.pretrained,
+        num_classes=0,
         dynamic_img_size=True,     # нужно для кропов 224 и 96 в одной модели
         drop_path_rate=cfg.drop_path_rate,
     )
     if cfg.grad_checkpointing:
         backbone.set_grad_checkpointing(True)
+    if cfg.freeze_blocks:
+        for name in ("patch_embed",):
+            module = getattr(backbone, name, None)
+            if module is not None:
+                module.requires_grad_(False)
+        for blk in list(getattr(backbone, "blocks", []))[: cfg.freeze_blocks]:
+            blk.requires_grad_(False)
     head = DINOHead(
         in_dim=backbone.num_features,
         out_dim=cfg.out_dim,
@@ -64,18 +78,16 @@ def build_param_groups(model: MultiCropWrapper, cfg: TrainingConfig):
     if hasattr(model.backbone, "no_weight_decay"):
         skip = {f"backbone.{n}" for n in model.backbone.no_weight_decay()}
 
-    buckets = {(bb, dec): [] for bb in (True, False) for dec in (True, False)}
+    buckets: dict[tuple[bool, bool], list] = {}
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
         is_backbone = name.startswith("backbone.")
         no_decay = p.ndim <= 1 or name.endswith(".bias") or name in skip
-        buckets[(is_backbone, not no_decay)].append(p)
+        buckets.setdefault((is_backbone, not no_decay), []).append(p)
 
     groups = []
     for (is_backbone, decay), params in buckets.items():
-        if not params:
-            continue
         base_lr = cfg.lr_backbone if is_backbone else cfg.lr_head
         groups.append({
             "params": params,
@@ -88,11 +100,12 @@ def build_param_groups(model: MultiCropWrapper, cfg: TrainingConfig):
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
-    logger = logging.getLogger("main")
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+    logger = logging.getLogger("train_dino")
     args = parse_args()
 
-    cfg = TrainingConfig()
+    cfg, sources = load_stage_config(args.config, TrainingConfig)
     if args.checkpoint_dir:
         cfg.checkpoint_dir = args.checkpoint_dir
     if args.epochs:
@@ -106,13 +119,17 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    # ---- данные
-    dataset = VehicleReIDDataset(
-        csv_path=args.csv,
-        images_dir=args.images_dir,
+    # ---- данные: несколько источников сразу
+    groups = build_groups(sources, require_pid=False)
+    stats = describe(groups)
+    logger.info("Источники: %s", stats.per_source)
+
+    dataset = MultiCropDataset(
+        groups=groups,
         global_transforms=build_global_crop_transforms(cfg.global_size),
         local_transform=build_local_crop_transforms(cfg.local_size),
         n_local_crops=cfg.n_local_crops,
+        bbox_padding=cfg.bbox_padding,
     )
     loader = DataLoader(
         dataset,
@@ -126,8 +143,8 @@ def main():
         worker_init_fn=seed_worker,
     )
     if len(loader) == 0:
-        raise ValueError("Машин меньше, чем gpu_batch_size")
-    logger.info("Vehicles: %d, micro-batches per epoch: %d", len(dataset), len(loader))
+        raise ValueError("Групп меньше, чем gpu_batch_size")
+    logger.info("Групп: %d, micro-batches на эпоху: %d", len(dataset), len(loader))
 
     # ---- модель / оптимизация
     model = build_model(cfg).to(device)
@@ -162,6 +179,7 @@ def main():
 
     trainer.train(loader)
     trainer.export_backbones()
+    logger.info("Готово. Веса для стадии 2: %s/teacher_backbone.pt", cfg.checkpoint_dir)
 
 
 if __name__ == "__main__":

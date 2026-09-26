@@ -1,83 +1,79 @@
+"""Извлечение эмбеддингов для query/gallery обученной моделью.
+
+    python -m scripts.extract_embeddings --config configs/serving.yaml \
+        --query-csv data/test_query.csv --gallery-csv data/test_gallery.csv \
+        --images-dir data/images
+"""
+from __future__ import annotations
+
 import argparse
-import os
+import logging
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
-from src.vehicle_reid.config import load_config
-from src.vehicle_reid.data.dataset import VehicleReIDDataset
+from src.vehicle_reid.config import load_serving_config
+from src.vehicle_reid.data.datasets import ReIDEvalDataset
+from src.vehicle_reid.data.sources import SourceSpec, groups_from_csv
 from src.vehicle_reid.data.transforms import build_eval_transforms
-from src.vehicle_reid.models.model import VehicleReIDModel
+from src.vehicle_reid.engine.evaluator import extract_embeddings
+from src.vehicle_reid.models.loader import load_reid_model
+
+logger = logging.getLogger("extract")
 
 
-def load_model(cfg, weights_path):
-    # num_classes здесь не важен — arc_head не используется при инференсе
-    # и будет исключён из загрузки ниже, если его форма не совпадает
-    model = VehicleReIDModel(
-        cfg.model.backbone, pretrained=False, embedding_dim=cfg.model.embedding_dim,
-        num_classes=1, pooling=cfg.model.pooling,
-    )
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", default="configs/serving.yaml")
+    p.add_argument("--weights", default=None)
+    p.add_argument("--query-csv", required=True)
+    p.add_argument("--gallery-csv", required=True)
+    p.add_argument("--images-dir", required=True)
+    p.add_argument("--out-dir", default="outputs")
+    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--num-workers", type=int, default=4)
+    return p.parse_args()
 
-    checkpoint_state = torch.load(weights_path, map_location="cpu")
-    model_state = model.state_dict()
 
-    # Оставляем только те тензоры, чья форма совпадает с текущей моделью.
-    # arc_head.weight (и другие head-специфичные слои) будут отброшены,
-    # т.к. для инференса они не нужны — используется только backbone+bottleneck
-    filtered_state = {
-        k: v for k, v in checkpoint_state.items()
-        if k in model_state and v.shape == model_state[k].shape
-    }
-
-    skipped = sorted(set(checkpoint_state.keys()) - set(filtered_state.keys()))
-    if skipped:
-        print(f"[load_model] Пропущены несовместимые/неиспользуемые ключи: {skipped}")
-
-    missing, unexpected = model.load_state_dict(filtered_state, strict=False)
-    if missing:
-        print(f"[load_model] Missing keys (не критично для inference): {missing}")
-
-    return model
+def build_loader(csv_path, images_dir, cfg, batch_size, num_workers, device):
+    spec = SourceSpec(name=Path(csv_path).stem, type="csv", csv=csv_path,
+                      images_dir=images_dir, group_by="none")
+    groups = groups_from_csv(spec)
+    ds = ReIDEvalDataset(groups, build_eval_transforms(cfg.image_size), cfg.bbox_padding)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+                        pin_memory=device.type == "cuda")
+    return loader, ds
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/config.yaml")
-    parser.add_argument("--weights", default="weights/best_model.pth")
-    parser.add_argument("--out", default="outputs/embeddings.npy")
-    parser.add_argument("--ids_out", default="outputs/embedding_ids.csv")
-    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+    args = parse_args()
+    cfg = load_serving_config(args.config)
+    weights = args.weights or cfg.weights
+    device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
 
-    cfg = load_config(args.config)
-    device = torch.device(cfg.project.device if torch.cuda.is_available() else "cpu")
+    model = load_reid_model(weights, cfg, device)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    model = load_model(cfg, args.weights).to(device).eval()
-    eval_tf = build_eval_transforms(cfg.data.image_size)
+    all_emb, all_ids = [], []
+    for name, csv_path in (("query", args.query_csv), ("gallery", args.gallery_csv)):
+        loader, ds = build_loader(csv_path, args.images_dir, cfg, args.batch_size,
+                                  args.num_workers, device)
+        emb, _, paths = extract_embeddings(model, loader, device)
+        ids = [Path(p).stem for p in paths]
+        np.save(out_dir / f"{name}_embeddings.npy", emb)
+        pd.DataFrame({"image_id": ids}).to_csv(out_dir / f"{name}_ids.csv", index=False)
+        logger.info("%s: %s -> %s", name, emb.shape, out_dir / f"{name}_embeddings.npy")
+        all_emb.append(emb)
+        all_ids.extend(ids)
 
-    query_ds = VehicleReIDDataset(cfg.data.query_csv, cfg.data.images_dir, eval_tf,
-                                   cfg.data.bbox_padding, mode="query")
-    gallery_ds = VehicleReIDDataset(cfg.data.gallery_csv, cfg.data.images_dir, eval_tf,
-                                     cfg.data.bbox_padding, mode="gallery")
-
-    query_loader = DataLoader(query_ds, batch_size=128, shuffle=False, num_workers=4)
-    gallery_loader = DataLoader(gallery_ds, batch_size=128, shuffle=False, num_workers=4)
-
-    all_embs, all_ids = [], []
-    with torch.no_grad():
-        for loader in (query_loader, gallery_loader):
-            for batch in loader:
-                images = batch["image"].to(device, non_blocking=True)
-                emb = model.get_embedding(images).cpu().numpy().astype(np.float32)
-                all_embs.append(emb)
-                all_ids.extend(batch["image_id"])
-
-    embeddings = np.concatenate(all_embs, axis=0).astype(np.float32)
-
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    np.save(args.out, embeddings)
-    pd.DataFrame({"image_id": all_ids}).to_csv(args.ids_out, index=False)
-    print(f"Saved embeddings: {embeddings.shape} -> {args.out}")
+    # совместимость со старым форматом: query, затем gallery в одном файле
+    np.save(out_dir / "embeddings.npy", np.concatenate(all_emb, axis=0))
+    pd.DataFrame({"image_id": all_ids}).to_csv(out_dir / "embedding_ids.csv", index=False)
 
 
 if __name__ == "__main__":

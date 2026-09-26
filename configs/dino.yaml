@@ -1,0 +1,76 @@
+# Стадия 1: DINO self-distillation на нескольких датасетах.
+# Размеченность не требуется; если у источника есть vehicle_id, группировка по нему
+# даёт кросс-камерные позитивы бесплатно (глобальные виды берутся с разных фото).
+
+sources:
+  # 1) целевой датасет — с bbox и метками (метки используются только для группировки)
+  - name: target
+    type: csv
+    csv: D:/Downloads/dataset/train.csv
+    images_dir: D:/Downloads/dataset/images
+    group_by: id
+    id_column: vehicle_id
+    use_bbox: true
+    repeat: 2          # целевой домен видим чаще, чем вспомогательные
+
+  # 2) внешний неразмеченный датасет — готовые кропы машин в папках
+  - name: veri_wild_unlabeled
+    type: folder
+    images_dir: /data/unlabeled/veri_wild
+    group_by: none
+
+  # 3) ещё один: картинки разложены по папкам-трекам → группируем по папке
+  - name: tracks
+    type: folder
+    images_dir: /data/unlabeled/tracks
+    group_by: parent
+
+model:
+  model_name: vit_large_patch16_dinov3.lvd1689m
+  drop_path_rate: 0.1
+  grad_checkpointing: true
+  freeze_blocks: 8          # ViT-L: 24 блока. Заморозка нижних сильно экономит VRAM
+  out_dim: 16384
+  head_hidden_dim: 2048
+  head_bottleneck_dim: 256
+
+data:
+  global_size: 224
+  local_size: 96
+  n_local_crops: 6
+  bbox_padding: 0.10
+  num_workers: 8
+
+optim:
+  epochs: 30
+  lr_backbone: 2.0e-5
+  lr_head: 2.0e-4
+  lr_min_ratio: 0.01
+  warmup_steps: 100
+  weight_decay: 0.04
+  gradient_clip: 3.0
+  backbone_freeze_steps: 200
+  freeze_last_layer_steps: 100
+
+batch:
+  # micro-batch в группах; каждая группа = 2 глобальных + n_local_crops локальных кропов
+  gpu_batch_size: 1
+  batch_size_start: 4
+  batch_size_end: 16
+  batch_size_warmup_steps: 300
+
+dino:
+  student_temp: 0.1
+  teacher_temp: 0.06
+  warmup_teacher_temp: 0.04
+  teacher_temp_warmup_steps: 300
+  center_momentum: 0.9
+  ema_momentum_start: 0.996
+  ema_momentum_end: 1.0
+
+logging:
+  log_interval: 10
+  save_interval: 500
+  keep_last_checkpoints: 3
+  checkpoint_dir: ./checkpoints/dino
+  seed: 42

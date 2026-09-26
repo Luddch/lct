@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.venv_test/
+.idea/
+.vscode/
+
+# артефакты обучения и инференса
+checkpoints/
+outputs/
+weights/
+runs/
+*.pt
+*.pth
+*.npy

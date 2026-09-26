@@ -3,27 +3,25 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
-from src.vehicle_reid.config import load_config
+import os
+
+from src.vehicle_reid.config import load_serving_config
 from src.vehicle_reid.api.service import ReIDService
 from src.vehicle_reid.api.schemas import SearchResponse, SearchResultItem
 from src.vehicle_reid.utils.bbox import BBoxValidationError
 
 app = FastAPI(title="Vehicle ReID Service")
 
-CFG = load_config("configs/config.yaml")
-SERVICE = ReIDService(CFG, weights_path="weights/best_model.pth")
+CFG = load_serving_config(os.environ.get("REID_CONFIG", "configs/serving.yaml"))
+SERVICE = ReIDService(CFG, weights_path=os.environ.get("REID_WEIGHTS", CFG.weights))
 
 
 @app.on_event("startup")
 def load_gallery():
     """Опционально предзагружаем эмбеддинги галереи, если они посчитаны заранее."""
     try:
-        embeddings = np.load("outputs/embeddings.npy")
-        ids_df = pd.read_csv("outputs/embedding_ids.csv")
-        query_df = pd.read_csv(CFG.data.query_csv)
-        n_query = len(query_df)
-        gallery_emb = embeddings[n_query:]
-        gallery_ids = ids_df["image_id"].tolist()[n_query:]
+        gallery_emb = np.load("outputs/gallery_embeddings.npy")
+        gallery_ids = pd.read_csv("outputs/gallery_ids.csv")["image_id"].tolist()
         SERVICE.load_gallery_index(gallery_emb, gallery_ids)
         print("Gallery index loaded.")
     except FileNotFoundError:

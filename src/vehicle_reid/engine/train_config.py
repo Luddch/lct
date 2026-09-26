@@ -5,8 +5,10 @@ from dataclasses import dataclass
 class TrainingConfig:
     # --- Модель ---
     model_name: str = "vit_large_patch16_dinov3.lvd1689m"
+    pretrained: bool = True
     drop_path_rate: float = 0.1
     grad_checkpointing: bool = True
+    freeze_blocks: int = 0          # заморозка нижних блоков ViT — экономия VRAM
     out_dim: int = 16384            # число прототипов DINO-головы (для небольшого датасета 65536 избыточно)
     head_hidden_dim: int = 2048
     head_bottleneck_dim: int = 256
@@ -15,6 +17,7 @@ class TrainingConfig:
     global_size: int = 224
     local_size: int = 96
     n_local_crops: int = 6
+    bbox_padding: float = 0.10
     num_workers: int = 8
 
     # --- Оптимизация ---

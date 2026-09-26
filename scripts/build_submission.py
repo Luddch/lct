@@ -2,13 +2,13 @@ import argparse
 import numpy as np
 import pandas as pd
 
-from src.vehicle_reid.config import load_config
+from src.vehicle_reid.config import load_serving_config
 from src.vehicle_reid.search.index import VectorIndex
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/config.yaml")
+    parser.add_argument("--config", default="configs/serving.yaml")
     parser.add_argument("--embeddings", default="outputs/embeddings.npy")
     parser.add_argument("--ids", default="outputs/embedding_ids.csv")
     parser.add_argument("--query_csv", default="dataset/test_query.csv")
@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--candidates_out", default="outputs/candidates.csv")
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    cfg = load_serving_config(args.config)
 
     embeddings = np.load(args.embeddings)
     ids_df = pd.read_csv(args.ids)
@@ -35,10 +35,10 @@ def main():
     query_emb = embeddings[:n_query]
     gallery_emb = embeddings[n_query:]
 
-    index = VectorIndex(backend=cfg.search.backend)
+    index = VectorIndex(backend=cfg.backend)
     index.build(gallery_emb, gallery_ids)
 
-    top_k = cfg.search.top_k
+    top_k = cfg.top_k
     scores, idxs = index.search(query_emb, top_k=top_k)
     matched_ids = index.get_ids(idxs)
 
@@ -52,7 +52,7 @@ def main():
 
     # candidates.csv: query_id, gallery_id, confidence (с порогом отказа)
     cand_rows = []
-    threshold = cfg.search.reject_threshold
+    threshold = cfg.reject_threshold
     for qid, cand_ids, cand_scores in zip(query_ids, matched_ids, scores):
         best_score = float(cand_scores[0]) if len(cand_scores) else -1.0
         if best_score < threshold:

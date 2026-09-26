@@ -1,0 +1,72 @@
+# Стадия 2: contrastive fine-tuning на финальном (размеченном) датасете.
+# Batch-hard triplet не используется: негативы берутся из memory-очереди,
+# поэтому качество почти не зависит от размера батча.
+
+sources:
+  - name: target
+    type: csv
+    csv: D:/Downloads/dataset/train.csv
+    images_dir: D:/Downloads/dataset/images
+    group_by: id
+    id_column: vehicle_id
+    use_bbox: true
+
+model:
+  backbone: vit_large_patch16_dinov3.lvd1689m
+  pretrained: true
+  dino_weights: ./checkpoints/dino/teacher_backbone.pt   # результат стадии 1
+  embedding_dim: 0            # 0 = без редукции (для ViT-L это 1024)
+  pooling: cls                # cls | gem
+  neck: bnneck
+  drop_path_rate: 0.1
+  grad_checkpointing: true
+  freeze_blocks: 12           # главный рычаг VRAM: нижние 12 из 24 блоков заморожены
+  freeze_backbone_steps: 100  # прогрев головы перед разморозкой бэкбона
+
+data:
+  image_size: [224, 224]
+  bbox_padding: 0.10
+  val_ratio: 0.15             # сплит по ID (disjoint identities)
+  n_query_per_id: 1
+  erasing_prob: 0.5
+  num_workers: 8
+
+batch:
+  micro_batch_size: 8         # изображений на форвард
+  accumulation_steps: 4       # эффективный батч = 8 * 4 * n_views = 64 вида
+  n_views: 2
+  p_per_batch: 2              # PK-сэмплер: 2 ID x 4 картинки = micro_batch_size
+  k_per_id: 4
+
+optim:
+  epochs: 20
+  lr_backbone: 1.0e-5
+  lr_head: 5.0e-4
+  lr_min_ratio: 0.01
+  warmup_steps: 100
+  weight_decay: 0.05
+  gradient_clip: 5.0
+  amp_dtype: bfloat16         # bfloat16 | float16 | none
+
+loss:
+  supcon_weight: 1.0
+  supcon_temperature: 0.07
+  queue_size: 8192            # негативов в очереди; 8192 x 1024 float32 ≈ 32 МБ
+  use_momentum_encoder: true
+  momentum_start: 0.99
+  momentum_end: 0.999
+  id_weight: 1.0
+  use_arcface: true
+  arcface_scale: 30.0
+  arcface_margin: 0.30
+  label_smoothing: 0.1
+  center_weight: 0.0
+
+validation:
+  eval_every: 1
+  eval_batch_size: 64
+  early_stop_patience: 6
+  log_interval: 10
+  keep_last_checkpoints: 2
+  checkpoint_dir: ./checkpoints/reid
+  seed: 42

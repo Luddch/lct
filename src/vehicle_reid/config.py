@@ -1,93 +1,73 @@
+"""Загрузка YAML-конфигов стадий обучения и инференса."""
 from __future__ import annotations
-import yaml
+
+import dataclasses
+import logging
 from dataclasses import dataclass, field
-from typing import List
+from typing import Any, List, Type, TypeVar
+
+import yaml
+
+from src.vehicle_reid.data.sources import SourceSpec, specs_from_config
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
-@dataclass
-class DataCfg:
-    root: str
-    images_dir: str
-    train_csv: str
-    query_csv: str
-    gallery_csv: str
-    image_size: List[int]
-    bbox_padding: float
-    val_ratio: float
+def _instantiate(cls: Type[T], data: dict[str, Any]) -> T:
+    """Создаёт dataclass из словаря, ругаясь на неизвестные ключи (защита от опечаток)."""
+    known = {f.name for f in dataclasses.fields(cls)}
+    unknown = set(data) - known
+    if unknown:
+        raise ValueError(f"{cls.__name__}: неизвестные поля в конфиге: {sorted(unknown)}")
+    return cls(**data)
 
 
-@dataclass
-class ModelCfg:
-    backbone: str
-    pretrained: bool
-    embedding_dim: int
-    pooling: str
-    neck: str
-    use_attributes: bool
-    attribute_columns: List[str]
-
-
-@dataclass
-class LossCfg:
-    id_loss: str
-    arcface_scale: float
-    arcface_margin: float
-    label_smoothing: float
-    triplet_margin: float
-    triplet_weight: float
-    id_weight: float
-    center_weight: float
-
-
-@dataclass
-class TrainCfg:
-    epochs: int
-    batch_size_p: int
-    batch_size_k: int
-    num_workers: int
-    lr: float
-    weight_decay: float
-    warmup_epochs: int
-    scheduler: str
-    amp: bool
-    eval_every: int
-    early_stop_patience: int
-
-
-@dataclass
-class SearchCfg:
-    metric: str
-    top_k: int
-    reject_threshold: float
-    backend: str
-
-
-@dataclass
-class ProjectCfg:
-    seed: int
-    device: str
-    output_dir: str
-    weights_dir: str
-
-
-@dataclass
-class Config:
-    project: ProjectCfg
-    data: DataCfg
-    model: ModelCfg
-    loss: LossCfg
-    train: TrainCfg
-    search: SearchCfg
-
-
-def load_config(path: str) -> Config:
+def read_yaml(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f)
-    return Config(
-        project=ProjectCfg(**raw["project"]),
-        data=DataCfg(**raw["data"]),
-        model=ModelCfg(**raw["model"]),
-        loss=LossCfg(**raw["loss"]),
-        train=TrainCfg(**raw["train"]),
-        search=SearchCfg(**raw["search"]),
-    )
+        return yaml.safe_load(f) or {}
+
+
+def load_stage_config(path: str, cls: Type[T]) -> tuple[T, list[SourceSpec]]:
+    """Читает конфиг вида {sources: [...], <остальные поля датакласса>}."""
+    raw = read_yaml(path)
+    sources = specs_from_config(raw.pop("sources", []))
+    # секции допускаются для читаемости: их содержимое просто сливается
+    flat: dict[str, Any] = {}
+    for key, value in raw.items():
+        if isinstance(value, dict):
+            flat.update(value)
+        else:
+            flat[key] = value
+    return _instantiate(cls, flat), sources
+
+
+# ------------------------------------------------------ конфиг сервиса/поиска
+
+
+@dataclass
+class ServingConfig:
+    weights: str = "checkpoints/reid/best.pt"
+    backbone: str = "vit_large_patch16_dinov3.lvd1689m"
+    embedding_dim: int = 0
+    pooling: str = "cls"
+    neck: str = "bnneck"
+    image_size: List[int] = field(default_factory=lambda: [224, 224])
+    bbox_padding: float = 0.10
+    device: str = "cuda"
+    metric: str = "cosine"
+    backend: str = "torch"
+    top_k: int = 10
+    reject_threshold: float = 0.35
+
+
+def load_serving_config(path: str) -> ServingConfig:
+    raw = read_yaml(path)
+    flat: dict[str, Any] = {}
+    for key, value in raw.items():
+        if isinstance(value, dict):
+            flat.update(value)
+        else:
+            flat[key] = value
+    return _instantiate(ServingConfig, flat)
