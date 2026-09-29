@@ -10,6 +10,7 @@ sources:
     group_by: id
     id_column: vehicle_id
     use_bbox: true
+    require_bbox: true       # упасть, если bbox не найден, а не молча взять всю картинку
 
 model:
   backbone: vit_large_patch16_dinov3.lvd1689m

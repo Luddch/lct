@@ -63,6 +63,7 @@ class SourceSpec:
     image_column: str = "image_id"
     image_extension: str = ".jpg"
     use_bbox: bool = True
+    require_bbox: bool = False  # падать, если bbox не нашёлся (защита от «молча взяли всю картинку»)
     repeat: int = 1  # сколько раз источник повторяется в эпохе (простое взвешивание)
     limit: int | None = None  # ограничение числа групп, удобно для отладки
     extensions: tuple[str, ...] = IMAGE_EXTENSIONS
@@ -85,6 +86,8 @@ def _iter_images(root: Path, extensions: Iterable[str]) -> list[Path]:
 
 
 def groups_from_folder(spec: SourceSpec) -> list[Group]:
+    if spec.require_bbox:
+        raise ValueError(f"Источник '{spec.name}': require_bbox недоступен для type=folder")
     root = Path(spec.images_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"Источник '{spec.name}': нет директории {root}")
@@ -119,8 +122,14 @@ def groups_from_csv(spec: SourceSpec, require_pid: bool = False) -> list[Group]:
         raise ValueError(f"Источник '{spec.name}': в csv нет колонки {spec.image_column}")
 
     has_bbox = spec.use_bbox and all(c in df.columns for c in BBOX_COLUMNS)
+    if spec.require_bbox and not has_bbox:
+        missing = [c for c in BBOX_COLUMNS if c not in df.columns]
+        raise ValueError(
+            f"Источник '{spec.name}': require_bbox=true, но bbox недоступен "
+            f"(use_bbox={spec.use_bbox}, нет колонок {missing})"
+        )
     if spec.use_bbox and not has_bbox:
-        logger.warning("Источник '%s': колонок bbox нет, используются целые картинки", spec.name)
+        logger.warning("Источник '%s': колонок bbox нет, используются ЦЕЛЫЕ картинки", spec.name)
     if has_bbox:
         df = df.dropna(subset=list(BBOX_COLUMNS))
 
@@ -160,15 +169,21 @@ def build_groups(specs: list[SourceSpec], require_pid: bool = False) -> list[Gro
         if spec.limit is not None:
             groups = groups[: spec.limit]
         n_images = sum(len(g.records) for g in groups)
+        n_bbox = sum(1 for g in groups for r in g.records if r.bbox is not None)
         logger.info(
-            "Источник '%s': %d групп, %d изображений (repeat=%d)",
-            spec.name, len(groups), n_images, spec.repeat,
+            "Источник '%s': %d групп, %d изображений, с bbox %d/%d (repeat=%d)",
+            spec.name, len(groups), n_images, n_bbox, n_images, spec.repeat,
         )
+        if n_bbox and n_bbox < n_images:
+            logger.warning("Источник '%s': bbox есть только у части изображений (%d из %d)",
+                           spec.name, n_bbox, n_images)
         all_groups.extend(groups * spec.repeat)
     if not all_groups:
         raise ValueError("Не найдено ни одной группы — проверьте секцию sources в конфиге")
-    logger.info("Всего: %d групп, %d изображений", len(all_groups),
-                sum(len(g.records) for g in all_groups))
+    total_images = sum(len(g.records) for g in all_groups)
+    total_bbox = sum(1 for g in all_groups for r in g.records if r.bbox is not None)
+    logger.info("Всего: %d групп, %d изображений, кропов по bbox %d/%d",
+                len(all_groups), total_images, total_bbox, total_images)
     return all_groups
 
 

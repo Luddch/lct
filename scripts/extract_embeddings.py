@@ -35,12 +35,16 @@ def parse_args():
     p.add_argument("--out-dir", default="outputs")
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--no-bbox", action="store_true", help="не резать по bbox (картинки уже кропы)")
+    p.add_argument("--require-bbox", action="store_true", help="упасть, если bbox нет в csv")
     return p.parse_args()
 
 
-def build_loader(csv_path, images_dir, cfg, batch_size, num_workers, device):
+def build_loader(csv_path, images_dir, cfg, batch_size, num_workers, device,
+                 use_bbox: bool = True, require_bbox: bool = False):
     spec = SourceSpec(name=Path(csv_path).stem, type="csv", csv=csv_path,
-                      images_dir=images_dir, group_by="none")
+                      images_dir=images_dir, group_by="none",
+                      use_bbox=use_bbox, require_bbox=require_bbox)
     groups = groups_from_csv(spec)
     ds = ReIDEvalDataset(groups, build_eval_transforms(cfg.image_size), cfg.bbox_padding)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers,
@@ -62,7 +66,8 @@ def main():
     all_emb, all_ids = [], []
     for name, csv_path in (("query", args.query_csv), ("gallery", args.gallery_csv)):
         loader, ds = build_loader(csv_path, args.images_dir, cfg, args.batch_size,
-                                  args.num_workers, device)
+                                  args.num_workers, device,
+                                  use_bbox=not args.no_bbox, require_bbox=args.require_bbox)
         emb, _, paths = extract_embeddings(model, loader, device)
         ids = [Path(p).stem for p in paths]
         np.save(out_dir / f"{name}_embeddings.npy", emb)

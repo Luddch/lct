@@ -52,6 +52,29 @@ python -m scripts.train_dino --config configs/dino.yaml --resume auto   # про
 
 Результат: `checkpoints/dino/teacher_backbone.pt` (бэкбон EMA-учителя — он стабильнее студента).
 
+## Как применяется bbox
+
+Один общий путь для всех стадий: `sources.groups_from_csv` читает колонки `x, y, w, h` →
+кладёт их в `Record.bbox` → `datasets.load_crop` режет кроп (`crop_with_padding`, расширение
+рамки на `bbox_padding` с каждой стороны) → и **только потом** идут аугментации и resize.
+
+Все датасеты наследуют один и тот же `_CropLoaderMixin._load`, поэтому кроп одинаково
+применяется в `MultiCropDataset` (DINO), `ReIDTrainDataset` (обучение),
+`ReIDEvalDataset` (валидация в обучении, `compare_models.py`, `extract_embeddings.py`)
+и в API (`ReIDService.validate_and_crop`).
+
+Чтобы случайно не обучиться на целых кадрах, у источника есть `require_bbox: true` —
+тогда отсутствие колонок `x,y,w,h` или `use_bbox: false` приведёт к ошибке, а не к тихому
+переходу на полные изображения. В логах при старте всегда печатается фактическая статистика:
+
+```
+Источник 'target': 1200 групп, 4800 изображений, с bbox 4800/4800 (repeat=1)
+Всего: 1200 групп, 4800 изображений, кропов по bbox 4800/4800
+```
+
+Если картинки уже являются кропами (внешние неразмеченные датасеты), ставьте
+`use_bbox: false` / `type: folder` — тогда берётся изображение целиком, это ожидаемо.
+
 ## Стадия 2: contrastive fine-tuning
 
 ```bash
@@ -112,7 +135,8 @@ python -m scripts.compare_models --config configs/reid.yaml \
 
 ```bash
 python -m scripts.extract_embeddings --config configs/serving.yaml \
-    --query-csv data/test_query.csv --gallery-csv data/test_gallery.csv --images-dir data/images
+    --query-csv data/test_query.csv --gallery-csv data/test_gallery.csv \
+    --images-dir data/images --require-bbox     # --no-bbox, если картинки уже кропы
 python -m scripts.build_submission --config configs/serving.yaml \
     --query_csv data/test_query.csv --gallery_csv data/test_gallery.csv
 
